@@ -30,3 +30,17 @@ test("plain text is escaped, no tags invented", () => {
 test("mixed text keeps order", () => {
 	expect(mdToHtml("see **this** and `that`")).toBe("see <b>this</b> and <code>that</code>");
 });
+
+test("table becomes one aligned pre block, cjk counted as two columns", () => {
+	const md = "| Name | 值 |\n| --- | :-: |\n| a | 中文 |\n| bbb | x |";
+	expect(mdToHtml(md)).toBe("<pre>Name  值\n----  ----\na     中文\nbbb   x</pre>");
+});
+
+test("text around a table survives", () => {
+	expect(mdToHtml("before\n| a | b |\n|---|---|\n| 1 | 2 |\nafter")).toBe("before\n<pre>a  b\n-  -\n1  2</pre>\nafter");
+});
+
+test("pipes inside fences and lone pipes stay literal", () => {
+	expect(mdToHtml("```\n| a | b |\n| - | - |\n```")).toBe("<pre><code>| a | b |\n| - | - |</code></pre>");
+	expect(mdToHtml("a | b")).toBe("a | b");
+});
