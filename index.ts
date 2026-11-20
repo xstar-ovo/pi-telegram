@@ -7,6 +7,8 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 
+import { mdToHtml } from "./markdown.ts";
+
 interface TelegramConfig {
 	botToken?: string;
 	botUsername?: string;
@@ -497,22 +499,42 @@ export default function (pi: ExtensionAPI) {
 			return false;
 		}
 		if (state.mode === "draft") {
-			await callTelegram<TelegramSentMessage>("sendMessage", { chat_id: chatId, text: finalText });
+			await sendFormatted(chatId, finalText);
 			await clearPreview(chatId);
 			return true;
 		}
 		previewState = undefined;
+		if (state.messageId !== undefined) {
+			// the preview was streamed as plain text; re-render it now that the turn is final
+			await callTelegram("editMessageText", {
+				chat_id: chatId,
+				message_id: state.messageId,
+				text: mdToHtml(finalText),
+				parse_mode: "HTML",
+			}).catch(() => undefined);
+		}
 		return state.messageId !== undefined;
+	}
+
+	// Markdown would otherwise arrive as literal "**bold**" in Telegram. Escape/format it,
+	// and fall back to plain text if Telegram rejects the HTML (e.g. unclosed tag after chunking).
+	async function sendFormatted(chatId: number, text: string): Promise<TelegramSentMessage> {
+		try {
+			return await callTelegram<TelegramSentMessage>("sendMessage", {
+				chat_id: chatId,
+				text: mdToHtml(text),
+				parse_mode: "HTML",
+			});
+		} catch {
+			return await callTelegram<TelegramSentMessage>("sendMessage", { chat_id: chatId, text });
+		}
 	}
 
 	async function sendTextReply(chatId: number, _replyToMessageId: number, text: string): Promise<number | undefined> {
 		const chunks = chunkParagraphs(text);
 		let lastMessageId: number | undefined;
 		for (const chunk of chunks) {
-			const sent = await callTelegram<TelegramSentMessage>("sendMessage", {
-				chat_id: chatId,
-				text: chunk,
-			});
+			const sent = await sendFormatted(chatId, chunk);
 			lastMessageId = sent.message_id;
 		}
 		return lastMessageId;
