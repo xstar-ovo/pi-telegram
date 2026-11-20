@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -15,6 +15,7 @@ interface TelegramConfig {
 	botId?: number;
 	allowedUserId?: number;
 	lastUpdateId?: number;
+	autoConnect?: boolean;
 }
 
 interface TelegramApiResponse<T> {
@@ -158,6 +159,7 @@ const TEMP_DIR = join(homedir(), ".pi", "agent", "tmp", "telegram");
 const TELEGRAM_PREFIX = "[telegram]";
 const MAX_MESSAGE_LENGTH = 4096;
 const MAX_ATTACHMENTS_PER_TURN = 10;
+const MAX_TEXT_CHARS = 8000;
 const PREVIEW_THROTTLE_MS = 750;
 const TELEGRAM_DRAFT_ID_MAX = 2_147_483_647;
 const TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS = 1200;
@@ -516,6 +518,25 @@ export default function (pi: ExtensionAPI) {
 		return state.messageId !== undefined;
 	}
 
+	// Over many messages a long reply is unreadable; send it as one .md document instead.
+	async function sendTextFile(chatId: number, text: string): Promise<void> {
+		const filePath = join(TEMP_DIR, `pi-reply-${Date.now()}.md`);
+		await mkdir(TEMP_DIR, { recursive: true });
+		await writeFile(filePath, text, "utf8");
+		try {
+			await callTelegramMultipart<TelegramSentMessage>(
+				"sendDocument",
+				{ chat_id: String(chatId), caption: `Reply is ${text.length} characters long - full text attached.` },
+				"document",
+				filePath,
+				basename(filePath),
+			);
+		} finally {
+			// Telegram has the bytes once the upload resolves.
+			await rm(filePath, { force: true });
+		}
+	}
+
 	// Markdown would otherwise arrive as literal "**bold**" in Telegram. Escape/format it,
 	// and fall back to plain text if Telegram rejects the HTML (e.g. unclosed tag after chunking).
 	async function sendFormatted(chatId: number, text: string): Promise<TelegramSentMessage> {
@@ -531,6 +552,14 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function sendTextReply(chatId: number, _replyToMessageId: number, text: string): Promise<number | undefined> {
+		if (text.length > MAX_TEXT_CHARS) {
+			try {
+				await sendTextFile(chatId, text);
+				return undefined;
+			} catch {
+				// Delivering the text in chunks beats losing it.
+			}
+		}
 		const chunks = chunkParagraphs(text);
 		let lastMessageId: number | undefined;
 		for (const chunk of chunks) {
@@ -666,7 +695,7 @@ export default function (pi: ExtensionAPI) {
 			const token = await ctx.ui.input("Telegram bot token", "123456:ABCDEF...");
 			if (!token) return;
 
-			const nextConfig: TelegramConfig = { ...config, botToken: token.trim() };
+			const nextConfig: TelegramConfig = { ...config, botToken: token.trim(), autoConnect: true };
 			const response = await fetch(`https://api.telegram.org/bot${nextConfig.botToken}/getMe`);
 			const data = (await response.json()) as TelegramApiResponse<TelegramUser>;
 			if (!data.ok || !data.result) {
@@ -948,6 +977,11 @@ export default function (pi: ExtensionAPI) {
 				if (signal.aborted) return;
 				if (error instanceof DOMException && error.name === "AbortError") return;
 				const message = error instanceof Error ? error.message : String(error);
+				if (message.startsWith("Conflict") || message.includes("terminated by other getUpdates")) {
+					// Only one process may poll a bot token (409); stepping aside beats retrying forever.
+					ctx.ui.notify("Telegram: another pi instance is already polling this bot token. Polling stopped here.", "warning");
+					return;
+				}
 				updateStatus(ctx, message);
 				await new Promise((resolve) => setTimeout(resolve, 3000));
 				updateStatus(ctx);
@@ -1016,6 +1050,7 @@ export default function (pi: ExtensionAPI) {
 				`polling: ${pollingPromise ? "running" : "stopped"}`,
 				`active telegram turn: ${activeTelegramTurn ? "yes" : "no"}`,
 				`queued telegram turns: ${queuedTelegramTurns.length}`,
+				`auto-connect: ${config.autoConnect === false ? "off" : "on"}`,
 			];
 			ctx.ui.notify(status.join(" | "), "info");
 		},
@@ -1025,6 +1060,10 @@ export default function (pi: ExtensionAPI) {
 		description: "Start the Telegram bridge in this pi session",
 		handler: async (_args, ctx) => {
 			config = await readConfig();
+			if (config.autoConnect === false) {
+				config.autoConnect = true;
+				await writeConfig(config);
+			}
 			if (!config.botToken) {
 				await promptForConfig(ctx);
 				return;
@@ -1037,6 +1076,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("telegram-disconnect", {
 		description: "Stop the Telegram bridge in this pi session",
 		handler: async (_args, ctx) => {
+			config.autoConnect = false;
+			await writeConfig(config);
 			await stopPolling();
 			updateStatus(ctx);
 		},
@@ -1046,6 +1087,10 @@ export default function (pi: ExtensionAPI) {
 		config = await readConfig();
 		await mkdir(TEMP_DIR, { recursive: true });
 		updateStatus(ctx);
+		// Headless sessions have no UI, and `/telegram-disconnect` opts out until reconnected.
+		if (ctx.hasUI && config.botToken && config.autoConnect !== false) {
+			await startPolling(ctx);
+		}
 	});
 
 	pi.on("session_shutdown", async (_event, _ctx) => {
