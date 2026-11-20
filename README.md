@@ -1,23 +1,28 @@
 # pi-telegram
 
-![pi-telegram screenshot](screenshot.png)
-
 > Full pi build session: [View the session transcript](https://pi.dev/session/#14acfe07b7844c8abec55ed9fbddc17f), which captures the full pi session in which `pi-telegram` was built.
 
 Telegram DM bridge for pi.
+
+This fork (`custom` branch) of [badlogic/pi-telegram](https://github.com/badlogic/pi-telegram) adds:
+
+- Markdown replies rendered as Telegram HTML (bold, code, links, headings, strikethrough), with a plain-text fallback if Telegram rejects the HTML.
+- Automatic connection at session start; `/telegram-disconnect` opts out until `/telegram-connect`.
+- Replies longer than 8000 characters are sent as one `.md` document instead of many split messages.
+- A bot-token conflict (another pi instance polling the same bot) stops polling instead of retrying forever.
 
 ## Install
 
 From git:
 
 ```bash
-pi install git:github.com/badlogic/pi-telegram
+pi install git:github.com/xstar-ovo/pi-telegram@custom
 ```
 
 Or for a single run:
 
 ```bash
-pi -e git:github.com/badlogic/pi-telegram
+pi -e git:github.com/xstar-ovo/pi-telegram@custom
 ```
 
 ## Configure
